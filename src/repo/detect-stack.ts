@@ -104,6 +104,51 @@ function detectStack(f: RepoFacts): Stack {
   return "unknown";
 }
 
+function composePorts(dir: string): number[] {
+  const ports = new Set<number>();
+  const addPort = (value: string) => {
+    const port = Number(value);
+    if (Number.isInteger(port) && port > 0 && port <= 65535) ports.add(port);
+  };
+  const addMapping = (value: string) => {
+    const mapping = value.trim().replace(/\s+#.*$/, "").replace(/^['"]|['"]$/g, "").replace(/\/(?:tcp|udp|sctp)$/i, "");
+    const match = mapping.match(/(?:^|:)(\d+)(?:-\d+)?:\d+(?:-\d+)?$/);
+    if (match) addPort(match[1]);
+  };
+
+  for (const name of ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"]) {
+    const file = path.join(dir, name);
+    if (!existsSync(file)) continue;
+
+    let portsIndent: number | undefined;
+    for (const line of readFileSync(file, "utf8").split(/\r?\n/)) {
+      const indent = line.match(/^\s*/)?.[0].length ?? 0;
+      const text = line.trim();
+      if (!text || text.startsWith("#")) continue;
+      if (portsIndent !== undefined && indent <= portsIndent) portsIndent = undefined;
+
+      const header = line.match(/^(\s*)ports\s*:\s*(.*?)\s*(?:#.*)?$/);
+      if (header) {
+        const inline = header[2].trim();
+        if (inline) {
+          for (const value of inline.replace(/^\[|\]$/g, "").split(",")) addMapping(value);
+        } else {
+          portsIndent = header[1].length;
+        }
+        continue;
+      }
+
+      if (portsIndent === undefined || indent <= portsIndent) continue;
+      const published = text.match(/^published\s*:\s*["']?(\d+)/);
+      if (published) addPort(published[1]);
+      const entry = text.match(/^-\s*(.+)$/);
+      if (entry) addMapping(entry[1]);
+    }
+  }
+
+  return [...ports];
+}
+
 function nodePackageManager(dir: string, pkg: Record<string, unknown>): string {
   const pm = typeof pkg.packageManager === "string" ? pkg.packageManager.split("@")[0] : undefined;
   if (pm) return pm;
@@ -203,6 +248,7 @@ export function heuristicPlan(f: RepoFacts): RunPlan {
       break;
     case "docker":
       plan.run = { cmd: "docker", args: ["compose", "up"], label: "docker compose up" };
+      plan.ports.push(...composePorts(d));
       plan.confident = true;
       break;
     case "static":
